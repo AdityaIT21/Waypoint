@@ -1,18 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 
-type TravelMode = "driving" | "cycling" | "walking";
+type TravelMode = "private" | "public" | "hybrid";
 
 type Location = {
   name: string;
   lat: number;
   lon: number;
-  country: string;
+  displayName: string;
 };
 
 type RouteData = {
   distanceKm: number;
   durationMin: number;
   geometry: [number, number][];
+  modeLabel: string;
 };
 
 type WeatherDay = {
@@ -23,10 +24,25 @@ type WeatherDay = {
   rain: number;
 };
 
+type Poi = {
+  name: string;
+  category: string;
+  lat: number;
+  lon: number;
+};
+
 type ItineraryDay = {
+  day: number;
+  date: string;
   title: string;
+  area: string;
   summary: string;
-  activities: string[];
+  morning: string;
+  afternoon: string;
+  evening: string;
+  why: string;
+  pace: string;
+  tags: string[];
 };
 
 type TripRequest = {
@@ -37,6 +53,7 @@ type TripRequest = {
   interests?: string[];
   start?: string;
   end?: string;
+  durationDays?: number;
 };
 
 type NominatimResult = {
@@ -50,9 +67,7 @@ type OsrmResponse = {
   routes?: Array<{
     distance: number;
     duration: number;
-    geometry: {
-      coordinates: [number, number][];
-    };
+    geometry: { coordinates: [number, number][] };
   }>;
 };
 
@@ -66,386 +81,256 @@ type OpenMeteoResponse = {
   };
 };
 
+type OverpassElement = {
+  lat?: number;
+  lon?: number;
+  center?: { lat: number; lon: number };
+  tags?: { name?: string; tourism?: string; historic?: string; leisure?: string; natural?: string; amenity?: string };
+};
+
 const headers = {
-  "User-Agent": "Waypoint/2.0 travel planner",
+  "User-Agent": "Waypoint Travel Planner/3.0",
 };
 
 const WEATHER_LABELS: Record<number, string> = {
-  0: "Clear sky",
-  1: "Mainly clear",
-  2: "Partly cloudy",
-  3: "Overcast",
-  45: "Fog",
-  48: "Rime fog",
-  51: "Light drizzle",
-  53: "Drizzle",
-  55: "Heavy drizzle",
-  61: "Light rain",
-  63: "Rain",
-  65: "Heavy rain",
-  71: "Light snow",
-  73: "Snow",
-  75: "Heavy snow",
-  80: "Rain showers",
-  81: "Rain showers",
-  82: "Heavy showers",
-  95: "Thunderstorm",
+  0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+  45: "Fog", 48: "Rime fog", 51: "Light drizzle", 53: "Drizzle",
+  55: "Heavy drizzle", 61: "Light rain", 63: "Rain", 65: "Heavy rain",
+  71: "Light snow", 73: "Snow", 75: "Heavy snow", 80: "Rain showers",
+  81: "Rain showers", 82: "Heavy showers", 95: "Thunderstorm",
+};
+
+const INTEREST_TERMS: Record<string, string[]> = {
+  Mountains: ["peak", "viewpoint", "nature", "park", "hill"],
+  Beaches: ["beach", "coast", "water"],
+  Culture: ["museum", "heritage", "historic", "temple", "monument"],
+  Food: ["restaurant", "cafe", "market"],
+  Adventure: ["park", "sport", "nature", "peak"],
+  Nature: ["park", "nature", "water", "forest"],
+  Wellness: ["spa", "wellness", "yoga"],
+  Nightlife: ["bar", "pub", "nightclub"],
+  Photography: ["viewpoint", "historic", "nature", "monument"],
+  "Road trip": ["viewpoint", "nature", "historic"],
 };
 
 async function geocode(query: string): Promise<Location> {
-  const url =
-    `https://nominatim.openstreetmap.org/search` +
-    `?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
-
-  const response = await fetch(url, {
-    headers,
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error("Geocoding service unavailable.");
-  }
-
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
+  const response = await fetch(url, { headers, cache: "no-store" });
+  if (!response.ok) throw new Error("Location search is temporarily unavailable.");
   const data = (await response.json()) as NominatimResult[];
-
-  if (!data.length) {
-    throw new Error(
-      `Could not find "${query}". Try a city, landmark or region.`
-    );
-  }
-
-  const result = data[0];
-
+  if (!data.length) throw new Error(`Could not find "${query}". Try a city, landmark or region.`);
   return {
-    name: result.display_name.split(",")[0],
-    lat: Number(result.lat),
-    lon: Number(result.lon),
-    country: result.display_name,
+    name: data[0].display_name.split(",")[0],
+    lat: Number(data[0].lat),
+    lon: Number(data[0].lon),
+    displayName: data[0].display_name,
   };
 }
 
-async function getRoute(
-  origin: Location,
-  destination: Location,
-  mode: TravelMode
-): Promise<RouteData> {
-  const profile =
-    mode === "cycling"
-      ? "bike"
-      : mode === "walking"
-        ? "foot"
-        : "car";
-
+async function getRoadRoute(origin: Location, destination: Location): Promise<RouteData> {
   const url =
-    `https://router.project-osrm.org/route/v1/${profile}/` +
+    `https://router.project-osrm.org/route/v1/driving/` +
     `${origin.lon},${origin.lat};${destination.lon},${destination.lat}` +
     `?overview=full&geometries=geojson`;
-
-  const response = await fetch(url, {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error("Routing service unavailable.");
-  }
-
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error("Route service is temporarily unavailable.");
   const data = (await response.json()) as OsrmResponse;
-
-  if (data.code !== "Ok" || !data.routes?.length) {
-    throw new Error("No route found for those locations.");
-  }
-
+  if (data.code !== "Ok" || !data.routes?.length) throw new Error("No road route could be found.");
   const route = data.routes[0];
-
   return {
     distanceKm: route.distance / 1000,
     durationMin: route.duration / 60,
     geometry: route.geometry.coordinates,
+    modeLabel: "Road backbone",
   };
 }
 
-async function getWeather(
-  location: Location
-): Promise<WeatherDay[]> {
+async function getWeather(destination: Location): Promise<WeatherDay[]> {
   const url =
-    `https://api.open-meteo.com/v1/forecast` +
-    `?latitude=${location.lat}` +
-    `&longitude=${location.lon}` +
-    `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max` +
-    `&timezone=auto` +
-    `&forecast_days=7`;
-
-  const response = await fetch(url, {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    return [];
-  }
-
+    `https://api.open-meteo.com/v1/forecast?latitude=${destination.lat}` +
+    `&longitude=${destination.lon}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max` +
+    `&timezone=auto&forecast_days=7`;
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) return [];
   const data = (await response.json()) as OpenMeteoResponse;
+  const d = data.daily;
+  if (!d?.time || !d.weather_code || !d.temperature_2m_max || !d.temperature_2m_min || !d.precipitation_probability_max) return [];
+  return d.time.slice(0, 7).map((date, i) => ({
+    date,
+    description: WEATHER_LABELS[d.weather_code![i]] ?? "Mixed conditions",
+    temp: d.temperature_2m_max![i],
+    min: d.temperature_2m_min![i],
+    rain: d.precipitation_probability_max![i],
+  }));
+}
 
-  const daily = data.daily;
-
-  if (
-    !daily?.time ||
-    !daily.weather_code ||
-    !daily.temperature_2m_max ||
-    !daily.temperature_2m_min ||
-    !daily.precipitation_probability_max
-  ) {
+async function getPois(destination: Location): Promise<Poi[]> {
+  const radius = 18000;
+  const query = `[out:json][timeout:20];(
+    node["tourism"~"attraction|museum|viewpoint|gallery"](around:${radius},${destination.lat},${destination.lon});
+    node["historic"](around:${radius},${destination.lat},${destination.lon});
+    node["natural"](around:${radius},${destination.lat},${destination.lon});
+    node["leisure"~"park|nature_reserve"](around:${radius},${destination.lat},${destination.lon});
+    node["amenity"~"restaurant|cafe|bar"](around:${radius},${destination.lat},${destination.lon});
+  );out center;`;
+  try {
+    const response = await fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", ...headers },
+      body: query,
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+    const data = (await response.json()) as { elements: OverpassElement[] };
+    const seen = new Set<string>();
+    return data.elements
+      .map((e) => {
+        const lat = e.lat ?? e.center?.lat;
+        const lon = e.lon ?? e.center?.lon;
+        const tags = e.tags ?? {};
+        const name = tags.name;
+        const category = tags.tourism ?? tags.historic ?? tags.natural ?? tags.leisure ?? tags.amenity ?? "place";
+        if (!name || lat == null || lon == null) return null;
+        return { name, category, lat, lon };
+      })
+      .filter((p): p is Poi => Boolean(p))
+      .filter((p) => {
+        const key = `${p.name}|${p.lat.toFixed(3)}|${p.lon.toFixed(3)}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 80);
+  } catch {
     return [];
   }
-
-  return daily.time.slice(0, 7).map(
-    (date: string, index: number): WeatherDay => ({
-      date,
-      description:
-        WEATHER_LABELS[daily.weather_code![index]] ??
-        "Mixed conditions",
-      temp: daily.temperature_2m_max![index],
-      min: daily.temperature_2m_min![index],
-      rain: daily.precipitation_probability_max![index],
-    })
-  );
 }
 
-function calculateTripDays(
-  start?: string,
-  end?: string,
-  distanceKm?: number
-): number {
-  if (start && end) {
-    const startDate = new Date(start);
-    const endDate = new Date(end);
-
-    const difference =
-      Math.round(
-        (endDate.getTime() - startDate.getTime()) /
-          (1000 * 60 * 60 * 24)
-      ) + 1;
-
-    if (difference > 0) {
-      return Math.min(14, difference);
-    }
-  }
-
-  const distanceBasedDays = Math.ceil((distanceKm ?? 0) / 250);
-
-  return Math.max(
-    1,
-    Math.min(7, distanceBasedDays || 1)
-  );
+function selectPois(pois: Poi[], interests: string[], style: string, days: number): Poi[] {
+  const terms = interests.flatMap((interest) => INTEREST_TERMS[interest] ?? []);
+  const scored = pois.map((poi) => {
+    let score = 0;
+    const text = `${poi.name} ${poi.category}`.toLowerCase();
+    for (const term of terms) if (text.includes(term)) score += 4;
+    if (style === "Scenic" && /view|nature|natural|park/.test(text)) score += 3;
+    if (style === "Culture" && /historic|museum|temple|monument/.test(text)) score += 3;
+    if (style === "Slow travel" && /cafe|park|nature|view/.test(text)) score += 2;
+    return { poi, score };
+  });
+  return scored.sort((a, b) => b.score - a.score).slice(0, Math.max(12, days * 4)).map((x) => x.poi);
 }
 
-function makeItinerary(
+function addDays(start: string, count: number): string[] {
+  const base = new Date(`${start}T12:00:00`);
+  return Array.from({ length: count }, (_, i) => {
+    const d = new Date(base);
+    d.setDate(base.getDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+}
+
+function displayDate(date: string): string {
+  return new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", weekday: "short" }).format(new Date(`${date}T12:00:00`));
+}
+
+function buildItinerary(
   origin: Location,
   destination: Location,
+  days: number,
+  start: string,
   style: string,
   interests: string[],
-  distanceKm: number,
-  start?: string,
-  end?: string
+  pois: Poi[],
+  weather: WeatherDay[],
+  mode: TravelMode,
 ): ItineraryDay[] {
-  const numberOfDays = calculateTripDays(
-    start,
-    end,
-    distanceKm
-  );
+  const dates = addDays(start, days);
+  const chosen = selectPois(pois, interests, style, days);
+  const chunks = Array.from({ length: Math.max(1, days - 1) }, () => [] as Poi[]);
+  chosen.forEach((poi, i) => chunks[i % chunks.length].push(poi));
+  const interest = interests[0] ?? "Nature";
 
-  const primaryInterests =
-    interests.length > 0 ? interests : ["Nature"];
-
-  return Array.from(
-    { length: numberOfDays },
-    (_, index): ItineraryDay => {
-      const interest =
-        primaryInterests[
-          index % primaryInterests.length
-        ];
-
-      const isFirstDay = index === 0;
-      const isLastDay = index === numberOfDays - 1;
-
-      let title: string;
-      let summary: string;
-
-      if (isFirstDay) {
-        title = `Arrive in ${origin.name}`;
-
-        summary =
-          "Settle in, orient yourself and keep the first day deliberately light.";
-      } else if (isLastDay) {
-        title = `Reach ${destination.name}`;
-
-        summary =
-          "Make the final approach part of the experience rather than treating it as only a transfer.";
-      } else {
-        title = `Day ${index + 1} — explore at your pace`;
-
-        summary =
-          `A ${style.toLowerCase()} day shaped around ${interest.toLowerCase()}.`;
-      }
-
-      const activities = [
-        interest,
-        style === "Slow travel"
-          ? "Long lunch"
-          : "Local food",
-        index % 2 === 0
-          ? "Neighbourhood walk"
-          : "Scenic stop",
-      ];
-
+  return dates.map((date, i) => {
+    if (i === 0) {
       return {
-        title,
-        summary,
-        activities,
+        day: 1, date, title: `Travel to ${destination.name}`, area: `${origin.name} → ${destination.name}`,
+        summary: `Leave ${origin.name}, arrive in ${destination.name}, check in and keep the evening intentionally light.`,
+        morning: mode === "public" ? "Use the best available public-transport connection for the departure." : "Begin the journey from your starting point.",
+        afternoon: `Arrive in ${destination.name}, check in and orient yourself around the neighbourhood.`,
+        evening: "Easy local walk, dinner and an early night.",
+        why: "The first day is treated as a transfer day, so the destination experience starts after arrival rather than being wasted on a fictional 'arrival in the origin'.",
+        pace: "Light", tags: ["Transfer", "Check-in", interest],
       };
     }
-  );
+    const dayPois = chunks[i - 1] ?? [];
+    const first = dayPois[0]?.name ?? `${interest} experience`;
+    const second = dayPois[1]?.name ?? "Explore a local neighbourhood";
+    const third = dayPois[2]?.name ?? "Local dinner";
+    const rain = weather.find((w) => w.date === date)?.rain ?? 0;
+    const outdoor = rain >= 60 ? "Keep the outdoor portion flexible and move it to the clearest window." : "Use the best weather window for the outdoor portion.";
+    const titleOptions = [
+      `Discover ${destination.name}`,
+      `The ${interest.toLowerCase()} day`,
+      `Beyond the obvious`,
+      `A slower side of ${destination.name}`,
+      `Local rhythm & hidden corners`,
+    ];
+    return {
+      day: i + 1, date, title: titleOptions[(i - 1) % titleOptions.length],
+      area: `${destination.name} & nearby`,
+      summary: `A ${style.toLowerCase()} day built around ${interest.toLowerCase()}, with enough slack to wander rather than race between pins.`,
+      morning: `${first}. Start early enough to have the place before the busiest period.`,
+      afternoon: `${second}. ${outdoor}`,
+      evening: `${third}. Finish with an unhurried meal and time back at your stay.`,
+      why: `Selected around your ${interest.toLowerCase()} preference and the shape of the trip, not as a generic checklist.`,
+      pace: style === "Packed" ? "Full" : style === "Slow travel" ? "Easy" : "Balanced",
+      tags: [interest, dayPois[0]?.category ?? "Explore", rain >= 60 ? "Weather-aware" : "Outdoor window"],
+    };
+  });
 }
 
-function buildTripNotes(
-  route: RouteData,
-  weather: WeatherDay[]
-): string[] {
-  const notes: string[] = [];
-
-  const rainyDays = weather.filter(
-    (day: WeatherDay) => day.rain >= 60
-  ).length;
-
-  if (rainyDays > 0) {
-    notes.push(
-      `${rainyDays} day(s) in the forecast have a 60%+ precipitation probability. Keep outdoor plans flexible.`
-    );
-  } else {
-    notes.push(
-      "No major precipitation signal in the 7-day destination forecast. Conditions can change beyond the forecast window."
-    );
-  }
-
-  if (route.distanceKm > 500) {
-    notes.push(
-      "This is a long overland transfer. Consider breaking the route into an overnight stop rather than treating it as a single travel day."
-    );
-  } else {
-    notes.push(
-      "Route distance is manageable as a single transfer, but scenic stops can change the practical travel time."
-    );
-  }
-
-  notes.push(
-    "Live traffic and road-closure data is not included by the current free routing endpoint. Check live navigation and local authority information before departure."
-  );
-
-  return notes;
-}
-
-export async function POST(
-  request: NextRequest
-): Promise<NextResponse> {
+export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as TripRequest;
-
-    if (!body.origin?.trim()) {
-      return NextResponse.json(
-        {
-          error: "Origin is required.",
-        },
-        {
-          status: 400,
-        }
-      );
+    if (!body.origin?.trim() || !body.destination?.trim()) {
+      return NextResponse.json({ error: "Please enter both an origin and destination." }, { status: 400 });
     }
-
-    if (!body.destination?.trim()) {
-      return NextResponse.json(
-        {
-          error: "Destination is required.",
-        },
-        {
-          status: 400,
-        }
-      );
-    }
-
-    const mode: TravelMode =
-      body.mode === "cycling" ||
-      body.mode === "walking"
-        ? body.mode
-        : "driving";
-
+    const start = body.start || new Date().toISOString().slice(0, 10);
+    const requestedDays = Number(body.durationDays);
+    const days = Number.isFinite(requestedDays) && requestedDays > 0
+      ? Math.min(30, Math.round(requestedDays))
+      : body.end
+        ? Math.min(30, Math.max(1, Math.round((new Date(body.end).getTime() - new Date(start).getTime()) / 86400000) + 1))
+        : 5;
+    const mode: TravelMode = body.mode === "public" || body.mode === "hybrid" ? body.mode : "private";
     const style = body.style || "Balanced";
-
-    const interests = Array.isArray(body.interests)
-      ? body.interests.filter(
-          (interest): interest is string =>
-            typeof interest === "string"
-        )
-      : [];
-
-    const [origin, destination] =
-      await Promise.all([
-        geocode(body.origin),
-        geocode(body.destination),
-      ]);
-
-    const route = await getRoute(
-      origin,
-      destination,
-      mode
-    );
-
-    const weather = await getWeather(destination);
-
-    const notes = buildTripNotes(
-      route,
-      weather
-    );
-
-    const days = makeItinerary(
-      origin,
-      destination,
-      style,
-      interests,
-      route.distanceKm,
-      body.start,
-      body.end
-    );
-
-    const weatherWithLabels = weather.map(
-      (day: WeatherDay) => ({
-        ...day,
-        label:
-          day.rain >= 60
-            ? "Rain risk"
-            : "Favourable",
-      })
-    );
-
+    const interests = Array.isArray(body.interests) ? body.interests.filter((x): x is string => typeof x === "string") : [];
+    const [origin, destination] = await Promise.all([geocode(body.origin), geocode(body.destination)]);
+    const [route, weather, pois] = await Promise.all([getRoadRoute(origin, destination), getWeather(destination), getPois(destination)]);
+    const itinerary = buildItinerary(origin, destination, days, start, style, interests, pois, weather, mode);
+    const wetDays = weather.filter((w) => w.rain >= 60).length;
+    const notes = [
+      wetDays ? `${wetDays} forecast day(s) have a 60%+ precipitation probability. Outdoor blocks are flagged so the plan can flex.` : "No major precipitation signal in the current 7-day destination forecast.",
+      mode === "private" ? "Private transport is planned around the road network." : mode === "public" ? "Public transport is your preferred mode. The displayed route is the road backbone; live train/bus inventory requires a dedicated transit provider." : "Hybrid travel lets you combine public transport for the long leg with private/local transfers.",
+      route.distanceKm > 500 ? "For a long transfer, consider a break or overnight stop if the journey becomes tiring." : "The transfer is short enough to keep the first destination day useful after arrival.",
+      "Weather and route data are live web data at planning time; traffic incidents and closures can change after the plan is generated.",
+    ];
     return NextResponse.json({
-      origin,
-      destination,
-      route,
-      weather: weatherWithLabels,
+      origin, destination,
+      route: { ...route, modeLabel: mode === "private" ? "Private transport" : mode === "public" ? "Public transport" : "Mixed / hybrid" },
+      weather: weather.map((w) => ({ ...w, label: w.rain >= 60 ? "Rain risk" : "Good window" })),
+      pois: pois.slice(0, 30),
       notes,
-      days,
+      days: itinerary,
+      trip: { start, days, end: datesEnd(start, days), mode, style, interests },
     });
   } catch (error: unknown) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Unexpected error.";
-
-    return NextResponse.json(
-      {
-        error: message,
-      },
-      {
-        status: 500,
-      }
-    );
+    const message = error instanceof Error ? error.message : "Waypoint could not build this trip.";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+function datesEnd(start: string, days: number): string {
+  const dates = addDays(start, days);
+  return dates[dates.length - 1];
 }
