@@ -1,27 +1,23 @@
-# Waypoint v2
+# Waypoint v3
 
-A Vercel-ready full-stack travel planner. It geocodes places, builds routes, checks live weather forecasts, and generates a preference-aware itinerary skeleton.
+Waypoint is an internet-connected travel planning prototype.
 
-## Stack
-- Next.js 15 + React 19 + TypeScript
-- OpenStreetMap Nominatim for geocoding
-- OSRM for routing
-- Open-Meteo for forecast data
-- Leaflet / OpenStreetMap tiles for the interactive map
+## Core behavior
 
-## Run locally
-```bash
-npm install
-npm run dev
-```
-Open http://localhost:3000.
+- Travel modes: Private transport, Public transport, Mixed journey.
+- Trip duration is explicitly treated as destination time.
+- Day 1 is the transfer from origin to destination.
+- Remaining days are destination exploration days.
+- Start date and destination-day duration generate calendar dates.
+- Destination POIs are discovered from OpenStreetMap/Overpass.
+- Weather comes from Open-Meteo.
+- Road backbone comes from OSRM.
+- Itinerary is shaped from interests, style, weather and discovered places.
 
-## Deploy to Vercel
-1. Create a Git repository and upload this project.
-2. Import the repository into Vercel.
-3. Framework preset: Next.js.
-4. Build command: `next build` (Vercel detects this automatically).
-5. No API key is required for the included public-data services.
+## Important data limitation
 
-## Important production note
-The included routing source provides route geometry and estimated travel time, but not authoritative live traffic or road-closure information. For a commercial production release, add a licensed traffic/road-incident provider and cache/geocode responsibly in accordance with each provider's terms.
+The public/mixed transport UI is intentional, but the current free backend does not provide live bus/train inventory or public-transit routing. For those modes, Waypoint uses the road route as a geographic backbone and explicitly tells the traveller that a dedicated transit provider is required for live schedules.
+
+## Deploy
+
+Push to GitHub and import the repository into Vercel. No environment variables are required for this prototype.
